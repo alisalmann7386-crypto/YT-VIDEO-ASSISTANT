@@ -2,6 +2,7 @@
 # Python >= 3.10 recommended
 
 # ── Audio / Video acquisition ─────────────────────────────────────────────────
+pytubefix>=8.6.0                  # PyTube fork designed to bypass YouTube 403 blocks on cloud platforms
 yt-dlp                            # Always fetches the latest build to avoid YouTube 403 errors
 pydub>=0.25.1                     # Audio file manipulation / format conversion
 ffmpeg-python>=0.2.0              # FFmpeg bindings (FFmpeg binary must be installed separately)

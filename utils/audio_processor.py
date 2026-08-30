@@ -8,14 +8,50 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 def download_youtube_audio(url: str) -> tuple[str, dict]:
     """
     Downloads YouTube audio as WAV and extracts video metadata.
-    Handles YouTube 403 Forbidden errors with client fallbacks.
+    Uses pytubefix and yt-dlp with multiple client strategies to bypass Cloud 403 Forbidden blocks.
     """
+    # ── Strategy 1: Try pytubefix (Specifically designed for Cloud 403 bypass) ──
+    try:
+        from pytubefix import YouTube
+        yt = YouTube(url, client='ANDROID_VR')
+        stream = yt.streams.filter(only_audio=True).first()
+        if not stream:
+            stream = yt.streams.get_lowest_resolution()
+        if stream:
+            out_file = stream.download(output_path=DOWNLOAD_DIR, filename_prefix="pytube_")
+            audio = AudioSegment.from_file(out_file)
+            wav_path = os.path.splitext(out_file)[0] + ".wav"
+            audio.export(wav_path, format="wav")
+            if os.path.exists(out_file) and out_file != wav_path:
+                try:
+                    os.remove(out_file)
+                except Exception:
+                    pass
+            
+            duration_sec = int(yt.length or 0)
+            hours, remainder = divmod(duration_sec, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            duration_str = f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:02d}:{seconds:02d}"
+
+            metadata = {
+                "title": yt.title or "YouTube Video",
+                "channel": yt.author or "Unknown Channel",
+                "thumbnail": yt.thumbnail_url or "",
+                "duration": duration_str,
+                "url": url
+            }
+            return wav_path, metadata
+    except Exception as py_err:
+        print(f"pytubefix download strategy failed: {py_err}, falling back to yt-dlp...")
+
+    # ── Strategy 2: Try yt-dlp with ANDROID_VR, WEB_CREATOR, IOS, MWEB, TVHTML5 ──
     output_path = os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s")
     
     client_strategies = [
-        ["mweb", "ios"],
-        ["android", "ios"],
-        ["web", "mweb"],
+        ["android_vr"],
+        ["web_creator"],
+        ["ios"],
+        ["mweb"],
         ["tvhtml5"]
     ]
 
@@ -39,7 +75,7 @@ def download_youtube_audio(url: str) -> tuple[str, dict]:
                 }
             },
             "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
                 "Accept-Language": "en-US,en;q=0.9",
             }
         }
@@ -68,7 +104,10 @@ def download_youtube_audio(url: str) -> tuple[str, dict]:
             last_exception = e
             continue
 
-    raise RuntimeError(f"Failed to download YouTube audio (403 Forbidden). Error details: {last_exception}")
+    raise RuntimeError(
+        f"YouTube blocked cloud server IP (403 Forbidden). Details: {last_exception}. "
+        f"Tip: You can also use the 'Local Audio/Video File' uploader in the sidebar to process your file directly!"
+    )
 
 
 def convert_to_wav(input_path: str) -> tuple[str, dict]:
