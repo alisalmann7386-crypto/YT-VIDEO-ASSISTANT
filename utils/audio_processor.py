@@ -2,14 +2,70 @@ import os
 import yt_dlp
 from pydub import AudioSegment
 
+import requests
+
 DOWNLOAD_DIR = 'downloades'
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+
+def download_via_cobalt(url: str) -> tuple[str, dict]:
+    """Downloads YouTube audio using the Cobalt API service (bypasses cloud IP 403 blocks)."""
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    payload = {
+        "url": url,
+        "downloadMode": "audio",
+        "audioFormat": "mp3"
+    }
+    resp = requests.post("https://api.cobalt.tools/", json=payload, headers=headers, timeout=15)
+    if resp.status_code == 200:
+        data = resp.json()
+        audio_url = data.get("url")
+        if audio_url:
+            audio_resp = requests.get(audio_url, stream=True, timeout=60)
+            mp3_path = os.path.join(DOWNLOAD_DIR, "cobalt_audio.mp3")
+            with open(mp3_path, "wb") as f:
+                for chunk in audio_resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            audio = AudioSegment.from_file(mp3_path)
+            wav_path = os.path.join(DOWNLOAD_DIR, "cobalt_audio.wav")
+            audio.export(wav_path, format="wav")
+            
+            if os.path.exists(mp3_path):
+                try:
+                    os.remove(mp3_path)
+                except Exception:
+                    pass
+
+            duration_sec = int(len(audio) / 1000)
+            minutes, seconds = divmod(duration_sec, 60)
+            
+            metadata = {
+                "title": "YouTube Video",
+                "channel": "YouTube",
+                "thumbnail": "",
+                "duration": f"{minutes:02d}:{seconds:02d}",
+                "url": url
+            }
+            return wav_path, metadata
+    raise RuntimeError(f"Cobalt API return status: {resp.status_code}")
+
 
 def download_youtube_audio(url: str) -> tuple[str, dict]:
     """
     Downloads YouTube audio as WAV and extracts video metadata.
-    Uses pytubefix and yt-dlp with multiple client strategies to bypass Cloud 403 Forbidden blocks.
+    Uses Cobalt API, pytubefix, and yt-dlp to bypass Cloud 403 Forbidden blocks.
     """
+    # ── Strategy 1: Try Cobalt API (High reliability for cloud IPs) ──
+    try:
+        print("Attempting audio download via Cobalt API...")
+        return download_via_cobalt(url)
+    except Exception as cob_err:
+        print(f"Cobalt API strategy failed ({cob_err}), trying pytubefix...")
     # ── Strategy 1: Try pytubefix (Specifically designed for Cloud 403 bypass) ──
     try:
         from pytubefix import YouTube
