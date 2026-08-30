@@ -67,16 +67,42 @@ def get_youtube_transcript_fast(url: str) -> tuple[dict, dict]:
 
     metadata = get_youtube_oembed_metadata(url, video_id)
     
-    yt_api = YouTubeTranscriptApi()
-    transcript_list = yt_api.list_transcripts(video_id)
-    
+    fetched = None
+    errors = []
+
+    # Strategy A: Direct get_transcript with common languages
     try:
-        transcript_obj = transcript_list.find_transcript(['en', 'en-US', 'en-GB', 'en-IN', 'hi'])
-    except Exception:
-        transcript_obj = next(iter(transcript_list))
+        fetched = YouTubeTranscriptApi.get_transcript(
+            video_id, 
+            languages=['en', 'en-US', 'en-GB', 'en-IN', 'hi', 'es', 'fr', 'de']
+        )
+    except Exception as e1:
+        errors.append(f"get_transcript: {e1}")
+
+    # Strategy B: List transcripts and find manual or generated transcript
+    if not fetched:
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            try:
+                transcript_obj = transcript_list.find_transcript(['en', 'en-US', 'en-GB', 'en-IN', 'hi'])
+            except Exception:
+                transcript_obj = next(iter(transcript_list))
+            fetched = transcript_obj.fetch()
+        except Exception as e2:
+            errors.append(f"list_transcripts: {e2}")
+
+    # Strategy C: Explicitly find generated transcript
+    if not fetched:
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            transcript_obj = transcript_list.find_generated_transcript(['en', 'hi'])
+            fetched = transcript_obj.fetch()
+        except Exception as e3:
+            errors.append(f"generated_transcript: {e3}")
+
+    if not fetched:
+        raise RuntimeError(f"No YouTube transcript/captions found for this video ({'; '.join(errors)})")
         
-    fetched = transcript_obj.fetch()
-    
     full_text_parts = []
     segments = []
     
@@ -104,6 +130,32 @@ def get_youtube_transcript_fast(url: str) -> tuple[dict, dict]:
         "segments": segments
     }
     return transcript_data, metadata
+
+
+def process_text_input(raw_text: str, title: str = "Custom Text Input") -> tuple[dict, dict]:
+    """Processes raw text transcript directly into structured segments."""
+    words = raw_text.strip().split()
+    segments = []
+    words_per_segment = 50
+    for i in range(0, len(words), words_per_segment):
+        seg_text = " ".join(words[i:i + words_per_segment])
+        start_sec = (i // words_per_segment) * 30
+        end_sec = start_sec + 30
+        segments.append({
+            "start": format_seconds(start_sec),
+            "end": format_seconds(end_sec),
+            "start_raw": start_sec,
+            "end_raw": end_sec,
+            "text": seg_text
+        })
+    metadata = {
+        "title": title,
+        "channel": "User Text Input",
+        "thumbnail": None,
+        "duration": format_seconds(len(segments) * 30),
+        "url": None
+    }
+    return {"full_text": raw_text.strip(), "segments": segments}, metadata
 
 
 def download_via_cobalt(url: str) -> tuple[str, dict]:

@@ -112,7 +112,7 @@ try:
 except Exception:
     pass
 
-from utils.audio_processor import process_input
+from utils.audio_processor import process_input, process_text_input
 from core.transcriber import transcribe_all
 from core.summarizer import summarize, generate_title
 from core.extractor import extract_insights
@@ -140,14 +140,21 @@ with st.sidebar:
 
     st.markdown("---")
     
-    input_type = st.radio("Source Type", ["YouTube URL", "Local Audio/Video File"])
+    input_type = st.radio("Source Type", ["YouTube URL", "Paste Text / Subtitles", "Local Audio/Video File"])
     
     source = ""
+    raw_text_input = ""
     if input_type == "YouTube URL":
         source = st.text_input(
             "YouTube Video URL",
             placeholder="https://www.youtube.com/watch?v=...",
             help="Paste a YouTube link to download and analyze."
+        )
+    elif input_type == "Paste Text / Subtitles":
+        raw_text_input = st.text_area(
+            "Paste Transcript or Notes",
+            height=160,
+            placeholder="Paste video text, transcript, or meeting notes here..."
         )
     else:
         uploaded_file = st.file_uploader(
@@ -173,21 +180,27 @@ with st.sidebar:
 
 # 6. Pipeline Execution
 if process_btn:
-    if not source:
+    if input_type == "Paste Text / Subtitles" and not raw_text_input.strip():
+        st.sidebar.error("Please paste transcript or text to analyze.")
+    elif input_type != "Paste Text / Subtitles" and not source:
         st.sidebar.error("Please provide a valid YouTube URL or upload a file.")
     else:
         with st.status("⚙️ Executing AI Processing Pipeline...", expanded=True) as status:
             try:
-                st.write("📥 Step 1/4: Extracting video transcript & metadata...")
-                proc_type, proc_data, metadata = process_input(source)
-                
-                if proc_type == "FAST_TRANSCRIPT":
-                    st.write("⚡ Step 2/4: Transcript retrieved instantly via YouTube Subtitles API!")
-                    transcript_data = proc_data
+                if input_type == "Paste Text / Subtitles":
+                    st.write("📥 Step 1/4: Structuring pasted text transcript...")
+                    transcript_data, metadata = process_text_input(raw_text_input)
                 else:
-                    chunks = proc_data
-                    st.write(f"🎙️ Step 2/4: Transcribing {len(chunks)} audio chunk(s) via {language.upper()} engine...")
-                    transcript_data = transcribe_all(chunks, language=language)
+                    st.write("📥 Step 1/4: Extracting video transcript & metadata...")
+                    proc_type, proc_data, metadata = process_input(source)
+                    
+                    if proc_type == "FAST_TRANSCRIPT":
+                        st.write("⚡ Step 2/4: Transcript retrieved instantly via YouTube Subtitles API!")
+                        transcript_data = proc_data
+                    else:
+                        chunks = proc_data
+                        st.write(f"🎙️ Step 2/4: Transcribing {len(chunks)} audio chunk(s) via {language.upper()} engine...")
+                        transcript_data = transcribe_all(chunks, language=language)
                 
                 if isinstance(transcript_data, dict):
                     full_transcript = transcript_data.get("full_text", "")
