@@ -1,15 +1,113 @@
 import os
+import re
+import requests
 import yt_dlp
 from pydub import AudioSegment
-
-import requests
+from youtube_transcript_api import YouTubeTranscriptApi
 
 DOWNLOAD_DIR = 'downloades'
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
+def extract_youtube_video_id(url: str) -> str:
+    """Extracts 11-character video ID from various YouTube URL formats."""
+    patterns = [
+        r'(?:v=|\/)([0-9A-Za-z_-]{11})',
+        r'youtu\.be\/([0-9A-Za-z_-]{11})',
+        r'youtube\.com\/shorts\/([0-9A-Za-z_-]{11})',
+        r'youtube\.com\/embed\/([0-9A-Za-z_-]{11})',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def format_seconds(seconds: float) -> str:
+    """Formats float seconds into HH:MM:SS or MM:SS."""
+    seconds = int(seconds)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def get_youtube_oembed_metadata(url: str, video_id: str) -> dict:
+    """Fetches video title, channel, and thumbnail via YouTube oEmbed API."""
+    oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+    try:
+        resp = requests.get(oembed_url, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            return {
+                "title": data.get("title", "YouTube Video"),
+                "channel": data.get("author_name", "YouTube Channel"),
+                "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
+                "duration": "YouTube Video",
+                "url": url
+            }
+    except Exception:
+        pass
+    return {
+        "title": f"YouTube Video ({video_id})",
+        "channel": "YouTube Channel",
+        "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
+        "duration": "YouTube Video",
+        "url": url
+    }
+
+
+def get_youtube_transcript_fast(url: str) -> tuple[dict, dict]:
+    """Retrieves timestamped transcript directly via YouTube Subtitles API."""
+    video_id = extract_youtube_video_id(url)
+    if not video_id:
+        raise ValueError("Invalid YouTube URL. Could not extract Video ID.")
+
+    metadata = get_youtube_oembed_metadata(url, video_id)
+    
+    yt_api = YouTubeTranscriptApi()
+    transcript_list = yt_api.list_transcripts(video_id)
+    
+    try:
+        transcript_obj = transcript_list.find_transcript(['en', 'en-US', 'en-GB', 'en-IN', 'hi'])
+    except Exception:
+        transcript_obj = next(iter(transcript_list))
+        
+    fetched = transcript_obj.fetch()
+    
+    full_text_parts = []
+    segments = []
+    
+    for item in fetched:
+        start_sec = item['start']
+        duration = item.get('duration', 0.0)
+        end_sec = start_sec + duration
+        text = item['text'].replace('\n', ' ').strip()
+        
+        if not text:
+            continue
+            
+        full_text_parts.append(text)
+        segments.append({
+            "start": format_seconds(start_sec),
+            "end": format_seconds(end_sec),
+            "start_raw": start_sec,
+            "end_raw": end_sec,
+            "text": text
+        })
+        
+    full_text = " ".join(full_text_parts)
+    transcript_data = {
+        "full_text": full_text,
+        "segments": segments
+    }
+    return transcript_data, metadata
+
+
 def download_via_cobalt(url: str) -> tuple[str, dict]:
-    """Downloads YouTube audio using the Cobalt API service (bypasses cloud IP 403 blocks)."""
+    """Downloads YouTube audio using Cobalt API microservice."""
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
@@ -56,17 +154,12 @@ def download_via_cobalt(url: str) -> tuple[str, dict]:
 
 
 def download_youtube_audio(url: str) -> tuple[str, dict]:
-    """
-    Downloads YouTube audio as WAV and extracts video metadata.
-    Uses Cobalt API, pytubefix, and yt-dlp to bypass Cloud 403 Forbidden blocks.
-    """
-    # ── Strategy 1: Try Cobalt API (High reliability for cloud IPs) ──
+    """Fallback audio download handler for YouTube videos without captions."""
     try:
-        print("Attempting audio download via Cobalt API...")
         return download_via_cobalt(url)
     except Exception as cob_err:
-        print(f"Cobalt API strategy failed ({cob_err}), trying pytubefix...")
-    # ── Strategy 1: Try pytubefix (Specifically designed for Cloud 403 bypass) ──
+        print(f"Cobalt API failed: {cob_err}, trying pytubefix...")
+
     try:
         from pytubefix import YouTube
         yt = YouTube(url, client='ANDROID_VR')
@@ -98,21 +191,12 @@ def download_youtube_audio(url: str) -> tuple[str, dict]:
             }
             return wav_path, metadata
     except Exception as py_err:
-        print(f"pytubefix download strategy failed: {py_err}, falling back to yt-dlp...")
+        print(f"pytubefix strategy failed: {py_err}, trying yt-dlp...")
 
-    # ── Strategy 2: Try yt-dlp with ANDROID_VR, WEB_CREATOR, IOS, MWEB, TVHTML5 ──
     output_path = os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s")
-    
-    client_strategies = [
-        ["android_vr"],
-        ["web_creator"],
-        ["ios"],
-        ["mweb"],
-        ["tvhtml5"]
-    ]
+    client_strategies = [["android_vr"], ["web_creator"], ["ios"], ["mweb"], ["tvhtml5"]]
 
     last_exception = None
-
     for client in client_strategies:
         ydl_opts = {
             "format": "bestaudio/best",
@@ -125,17 +209,12 @@ def download_youtube_audio(url: str) -> tuple[str, dict]:
             "quiet": True,
             "no_warnings": True,
             "nocheckcertificate": True,
-            "extractor_args": {
-                "youtube": {
-                    "player_client": client
-                }
-            },
+            "extractor_args": {"youtube": {"player_client": client}},
             "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Accept-Language": "en-US,en;q=0.9",
             }
         }
-        
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -161,8 +240,8 @@ def download_youtube_audio(url: str) -> tuple[str, dict]:
             continue
 
     raise RuntimeError(
-        f"YouTube blocked cloud server IP (403 Forbidden). Details: {last_exception}. "
-        f"Tip: You can also use the 'Local Audio/Video File' uploader in the sidebar to process your file directly!"
+        f"YouTube audio download failed ({last_exception}). "
+        f"Tip: Upload local audio/video file directly using sidebar!"
     )
 
 
@@ -187,6 +266,7 @@ def convert_to_wav(input_path: str) -> tuple[str, dict]:
 
 
 def chunk_audio(wav_path: str, chunk_minutes: int = 10) -> list:
+    """Splits long audio into chunks."""
     audio = AudioSegment.from_wav(wav_path)
     chunk_ms = chunk_minutes * 60 * 1000 
 
@@ -200,15 +280,24 @@ def chunk_audio(wav_path: str, chunk_minutes: int = 10) -> list:
     return chunks
 
 
-def process_input(source: str) -> tuple[list, dict]:
-    """Returns a tuple containing (chunks_list, metadata_dict)."""
+def process_input(source: str) -> tuple[str, any, dict]:
+    """
+    Unified input processor.
+    Returns: (proc_type, proc_data, metadata_dict)
+    proc_type: "FAST_TRANSCRIPT" or "CHUNKS"
+    """
     if source.startswith("http://") or source.startswith("https://"):
-        print("Detected YouTube URL. Downloading audio...")
-        wav_path, metadata = download_youtube_audio(source)
+        print("Detected YouTube URL. Attempting instant transcript extraction...")
+        try:
+            transcript_data, metadata = get_youtube_transcript_fast(source)
+            return "FAST_TRANSCRIPT", transcript_data, metadata
+        except Exception as e:
+            print(f"Fast transcript API failed ({e}), falling back to audio download...")
+            wav_path, metadata = download_youtube_audio(source)
     else:
         print("Detected local file. Converting to WAV...")
         wav_path, metadata = convert_to_wav(source)
 
     print("Chunking audio...")
     chunks = chunk_audio(wav_path)
-    return chunks, metadata
+    return "CHUNKS", chunks, metadata

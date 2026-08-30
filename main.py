@@ -11,9 +11,13 @@ load_dotenv()
 def run_pipeline(source :str, language :str = "english") -> dict:
     print("starting AI Video Assistant")
 
-    chunks, metadata = process_input(source)
+    proc_type, proc_data, metadata = process_input(source)
+    if proc_type == "FAST_TRANSCRIPT":
+        transcript_data = proc_data
+    else:
+        chunks = proc_data
+        transcript_data = transcribe_all(chunks, language)
 
-    transcript_data = transcribe_all(chunks, language)
     if isinstance(transcript_data, dict):
         full_transcript = transcript_data.get("full_text", "")
         segments = transcript_data.get("segments", [])

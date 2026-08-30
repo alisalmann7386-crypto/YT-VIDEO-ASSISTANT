@@ -178,11 +178,16 @@ if process_btn:
     else:
         with st.status("⚙️ Executing AI Processing Pipeline...", expanded=True) as status:
             try:
-                st.write("📥 Step 1/4: Downloading audio & extracting video metadata...")
-                chunks, metadata = process_input(source)
+                st.write("📥 Step 1/4: Extracting video transcript & metadata...")
+                proc_type, proc_data, metadata = process_input(source)
                 
-                st.write(f"🎙️ Step 2/4: Transcribing {len(chunks)} audio chunk(s) via {language.upper()} engine...")
-                transcript_data = transcribe_all(chunks, language=language)
+                if proc_type == "FAST_TRANSCRIPT":
+                    st.write("⚡ Step 2/4: Transcript retrieved instantly via YouTube Subtitles API!")
+                    transcript_data = proc_data
+                else:
+                    chunks = proc_data
+                    st.write(f"🎙️ Step 2/4: Transcribing {len(chunks)} audio chunk(s) via {language.upper()} engine...")
+                    transcript_data = transcribe_all(chunks, language=language)
                 
                 if isinstance(transcript_data, dict):
                     full_transcript = transcript_data.get("full_text", "")
