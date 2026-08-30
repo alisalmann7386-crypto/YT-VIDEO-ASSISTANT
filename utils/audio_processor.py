@@ -59,6 +59,60 @@ def get_youtube_oembed_metadata(url: str, video_id: str) -> dict:
     }
 
 
+def get_transcript_via_piped(video_id: str) -> list:
+    """Fallback subtitle fetcher via public Piped API instances."""
+    piped_instances = [
+        "https://api.piped.video",
+        "https://pipedapi.kavin.rocks",
+        "https://pipedapi.tokhmi.xyz"
+    ]
+    for instance in piped_instances:
+        try:
+            resp = requests.get(f"{instance}/streams/{video_id}", timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                subtitles = data.get("subtitles", [])
+                if subtitles:
+                    sub_url = None
+                    for sub in subtitles:
+                        code = sub.get("code", "").lower()
+                        name = sub.get("name", "").lower()
+                        if "en" in code or "english" in name or "hi" in code:
+                            sub_url = sub.get("url")
+                            break
+                    if not sub_url and subtitles:
+                        sub_url = subtitles[0].get("url")
+                    
+                    if sub_url:
+                        sub_resp = requests.get(sub_url, timeout=5)
+                        if sub_resp.status_code == 200:
+                            vtt_text = sub_resp.text
+                            lines = vtt_text.splitlines()
+                            fetched = []
+                            current_start = 0.0
+                            for line in lines:
+                                line_str = line.strip()
+                                if "-->" in line_str:
+                                    parts = line_str.split("-->")
+                                    try:
+                                        t_parts = parts[0].strip().split(":")
+                                        if len(t_parts) == 3:
+                                            current_start = float(t_parts[0])*3600 + float(t_parts[1])*60 + float(t_parts[2])
+                                        elif len(t_parts) == 2:
+                                            current_start = float(t_parts[0])*60 + float(t_parts[1])
+                                    except Exception:
+                                        pass
+                                elif line_str and not line_str.startswith("WEBVTT") and not line_str.isdigit():
+                                    clean = re.sub(r'<[^>]+>', '', line_str)
+                                    if clean:
+                                        fetched.append({"start": current_start, "duration": 5.0, "text": clean})
+                            if fetched:
+                                return fetched
+        except Exception:
+            continue
+    return None
+
+
 def get_youtube_transcript_fast(url: str) -> tuple[dict, dict]:
     """Retrieves timestamped transcript directly via YouTube Subtitles API."""
     video_id = extract_youtube_video_id(url)
@@ -99,6 +153,13 @@ def get_youtube_transcript_fast(url: str) -> tuple[dict, dict]:
             fetched = transcript_obj.fetch()
         except Exception as e3:
             errors.append(f"generated_transcript: {e3}")
+
+    # Strategy D: Try Piped API instances for subtitle streams
+    if not fetched:
+        try:
+            fetched = get_transcript_via_piped(video_id)
+        except Exception as e4:
+            errors.append(f"piped_api: {e4}")
 
     if not fetched:
         raise RuntimeError(f"No YouTube transcript/captions found for this video ({'; '.join(errors)})")
