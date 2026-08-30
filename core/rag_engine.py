@@ -1,86 +1,241 @@
 import os
-from langchain_mistralai import ChatMistralAI
+
+from dotenv import load_dotenv
+
+from langchain_core.documents import Document
+from langchain_community.vectorstores import FAISS
+
+from langchain_mistralai import (
+    MistralAIEmbeddings,
+    ChatMistralAI
+)
+
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough, RunnableLambda
-from core.vector_store import build_vector_store, load_vector_store, get_retriever
+from langchain_core.runnables import RunnablePassthrough
 
-def get_llm():
-    return ChatMistralAI(
+load_dotenv()
+
+
+# ============================================================
+# 1. CREATE TIMESTAMPED DOCUMENTS
+# ============================================================
+
+def prepare_documents(segments, group_size=5):
+
+    documents = []
+
+    if not isinstance(segments, list):
+        return documents
+
+    for i in range(0, len(segments), group_size):
+
+        group = segments[i:i + group_size]
+
+        texts = []
+        valid_segments = []
+
+        for seg in group:
+
+            text = seg.get("text", "").strip()
+
+            if not text:
+                continue
+
+            texts.append(text)
+            valid_segments.append(seg)
+
+        if not texts:
+            continue
+
+        start = valid_segments[0].get(
+            "start",
+            "00:00"
+        )
+
+        end = valid_segments[-1].get(
+            "end",
+            start
+        )
+
+        combined_text = " ".join(texts)
+
+        documents.append(
+            Document(
+                page_content=combined_text,
+                metadata={
+                    "start": str(start),
+                    "end": str(end),
+                    "start_raw": valid_segments[0].get(
+                        "start_raw",
+                        0
+                    ),
+                    "end_raw": valid_segments[-1].get(
+                        "end_raw",
+                        0
+                    )
+                }
+            )
+        )
+
+    return documents
+
+
+# ============================================================
+# 2. BUILD RAG
+# ============================================================
+
+def build_rag_chain(segments):
+
+    documents = prepare_documents(
+        segments,
+        group_size=5
+    )
+
+    if not documents:
+        raise ValueError(
+            "No timestamped transcript segments found."
+        )
+
+    # --------------------------------------------------------
+    # EMBEDDINGS
+    # --------------------------------------------------------
+
+    embeddings = MistralAIEmbeddings(
+        model="mistral-embed"
+    )
+
+    # --------------------------------------------------------
+    # FAISS
+    # --------------------------------------------------------
+
+    vectorstore = FAISS.from_documents(
+        documents,
+        embeddings
+    )
+
+    # --------------------------------------------------------
+    # RETRIEVER
+    # --------------------------------------------------------
+
+    retriever = vectorstore.as_retriever(
+        search_type="mmr",
+        search_kwargs={
+            "k": 5,
+            "fetch_k": 20,
+            "lambda_mult": 0.5
+        }
+    )
+
+    # ========================================================
+    # FORMAT RETRIEVED DOCUMENTS
+    # ========================================================
+
+    def format_docs_with_timestamps(docs):
+
+        formatted = []
+
+        for doc in docs:
+
+            start = doc.metadata.get(
+                "start",
+                "Unknown"
+            )
+
+            end = doc.metadata.get(
+                "end",
+                "Unknown"
+            )
+
+            formatted.append(
+                f"[{start} - {end}]\n"
+                f"{doc.page_content}"
+            )
+
+        return "\n\n---\n\n".join(formatted)
+
+    # ========================================================
+    # LLM
+    # ========================================================
+
+    llm = ChatMistralAI(
         model="mistral-small-latest",
-        mistral_api_key=os.getenv("MISTRAL_API_KEY"),
-        temperature=0.3,
+        temperature=0.1
     )
 
-def format_docs(docs):
-    return "\n\n".join([doc.page_content for doc in docs])
+    # ========================================================
+    # PROMPT
+    # ========================================================
 
-def build_rag_chain(transcript:str):
-
-    vector_store = build_vector_store(transcript)
-
-    retriever = get_retriever(vector_store, k = 4)
-
-    llm = get_llm()
-
-    prompt = ChatPromptTemplate.from_messages(
-
-        [(
-            "system",
-            """You are an expert meeting assistant. Answer the user's question 
-based ONLY on the meeting transcript context provided below.
-
-If the answer is not found in the context, say: 
-"I could not find this information in the meeting transcript."
-
-Always be concise and precise. If quoting someone, mention it clearly.
-
-Context from meeting transcript:
-{context}""",
-        ),
-        ("human", "{question}"),
-    ]
-    )
-
-    #full LCEL Rag pipeline 
-
-    rag_chain = (
-
-        {"context" : retriever | RunnableLambda(format_docs),
-         "question": RunnablePassthrough()
-         }
-         |prompt|llm|StrOutputParser()
-    )
-
-    return rag_chain
-
-
-def load_rag_chain():
-    vector_store = load_vector_store()
-    retriver = get_retriever()
-
-    llm = get_llm()
     prompt = ChatPromptTemplate.from_messages([
+
         (
             "system",
-            """You are an expert meeting assistant. Answer the user's question 
-based ONLY on the meeting transcript context provided below.
+            """
+You are an AI assistant that answers questions
+about a video using timestamped transcript excerpts.
 
-If the answer is not found in the context, say: 
-"I could not find this information in the meeting transcript."
+The context contains transcript sections with timestamps
+in this format:
 
-Always be concise and precise. If quoting someone, mention it clearly.
+[MM:SS - MM:SS]
 
-Context from meeting transcript:
-{context}""",
+IMPORTANT RULES:
+
+1. Answer ONLY using the provided transcript context.
+
+2. If the user asks:
+   - "When was X discussed?"
+   - "At what timestamp was X mentioned?"
+   - "Where did they talk about X?"
+   - "When did they explain X?"
+
+   return the timestamp of the most relevant section.
+
+3. If multiple sections discuss the topic, return all
+   important timestamp ranges.
+
+4. Give the topic and timestamp clearly.
+
+5. Do not invent timestamps.
+
+6. If the topic is not present in the retrieved context,
+   say that you could not find it.
+
+7. When possible, briefly explain what was discussed
+   at that timestamp.
+
+Example:
+
+User:
+"When was PCA discussed?"
+
+Good answer:
+
+"PCA was discussed around 12:40–14:15.
+The speaker explained PCA as a dimensionality
+reduction technique."
+
+CONTEXT:
+
+{context}
+"""
         ),
-        ("human", "{question}"),
+
+        (
+            "human",
+            "{question}"
+        )
     ])
+
+    # ========================================================
+    # RAG CHAIN
+    # ========================================================
 
     rag_chain = (
         {
-            "context":  retriver| RunnableLambda(format_docs),
-            "question": RunnablePassthrough(),
+            "context": retriever | format_docs_with_timestamps,
+            "question": RunnablePassthrough()
         }
         | prompt
         | llm
@@ -90,8 +245,23 @@ Context from meeting transcript:
     return rag_chain
 
 
-def ask_question(rag_chain, question:str) -> str:
-    print(f"Question : {question}")
-    answer = rag_chain.invoke(question)
-    print(f"answer :{answer}")
-    return answer
+# ============================================================
+# 3. ASK QUESTION
+# ============================================================
+
+def ask_question(rag_chain, question):
+
+    try:
+
+        response = rag_chain.invoke(
+            question
+        )
+
+        return response
+
+    except Exception as e:
+
+        return (
+            "An error occurred while querying "
+            f"the video model: {str(e)}"
+        )

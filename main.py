@@ -11,25 +11,32 @@ load_dotenv()
 def run_pipeline(source :str, language :str = "english") -> dict:
     print("starting AI Video Assistant")
 
-    chunks = process_input(source)
+    chunks, metadata = process_input(source)
 
-    transcript = transcribe_all(chunks,language)
-    print(f"raw transcription (first 300 characters ) {transcript[:300]}")
+    transcript_data = transcribe_all(chunks, language)
+    if isinstance(transcript_data, dict):
+        full_transcript = transcript_data.get("full_text", "")
+        segments = transcript_data.get("segments", [])
+    else:
+        full_transcript = transcript_data
+        segments = []
 
-    title = generate_title(transcript)
+    print(f"raw transcription (first 300 characters): {full_transcript[:300]}")
 
-    summary = summarize(transcript)
+    title = generate_title(full_transcript)
 
-    action_item = extract_action_items(transcript)
+    summary = summarize(full_transcript)
 
-    decisions = extract_key_decisions(transcript)
-    questions = extract_questions(transcript)
+    action_item = extract_action_items(full_transcript)
+
+    decisions = extract_key_decisions(full_transcript)
+    questions = extract_questions(full_transcript)
     
-    rag_chain = build_rag_chain(transcript)
+    rag_chain = build_rag_chain(segments)
 
     return {
         "title": title,
-        "transcript": transcript,
+        "transcript": full_transcript,
         "summary": summary,
         "action_items": action_item,
         "key_decisions": decisions,

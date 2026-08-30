@@ -1,77 +1,109 @@
-#Actionableitems , decision , questions 
-
-from langchain_mistralai import ChatMistralAI
+import os
+from typing import List
+from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough, RunnableLambda
-from concurrent.futures import ThreadPoolExecutor
-import os 
+from langchain_mistralai import ChatMistralAI
 
 
-def get_llm():
-    return ChatMistralAI(model = "mistral-small-latest", mistral_api_key = os.getenv("MISTRAL_API_KEY"),temperature=0.2)
-
-
-
-def build_chain(system_prompt : str):
-    llm = get_llm()
-    return (
-        RunnablePassthrough() | RunnableLambda(lambda x : {"text" : x}) |ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human","{text}"),
-    ]) | llm |StrOutputParser()
+# ==========================================
+# 1. PYDANTIC SCHEMA DEFINITION
+# ==========================================
+class KeyInsightsSchema(BaseModel):
+    """Schema for extracting structured insights from a transcript."""
+    action_items: List[str] = Field(
+        default_factory=lambda: ["None discussed"],
+        description=(
+            "Actionable tasks assigned to individuals or teams with clear responsibilities. "
+            "If none are explicitly mentioned, return ['None discussed']."
+        )
+    )
+    key_decisions: List[str] = Field(
+        default_factory=lambda: ["None discussed"],
+        description=(
+            "Key choices, agreements, policies, or conclusions agreed upon. "
+            "If none are explicitly mentioned, return ['None discussed']."
+        )
+    )
+    open_questions: List[str] = Field(
+        default_factory=lambda: ["None discussed"],
+        description=(
+            "Unresolved questions, pending issues, or topics needing further clarification. "
+            "If none are explicitly mentioned, return ['None discussed']."
+        )
     )
 
-def extract_action_items(transcript:str)->str:
-    chain = build_chain(
-         "You are an expert meeting analyst. From the meeting transcript, "
-        "extract all action items. For each provide:\n"
-        "- Task description\n"
-        "- Owner (who is responsible)\n"
-        "- Deadline (if mentioned, else write 'Not specified')\n\n"
-        "Format as a numbered list. If none found say 'No action items found.'"
-    )
 
-    return chain.invoke(transcript)
+# ==========================================
+# 2. MAIN EXTRACTION PIPELINE
+# ==========================================
+def extract_insights(transcript: str) -> dict:
+    if not transcript or not transcript.strip():
+        return {
+            "action_items": ["No transcript content provided."],
+            "key_decisions": ["No transcript content provided."],
+            "open_questions": ["No transcript content provided."]
+        }
+
+    api_key = os.getenv("MISTRAL_API_KEY")
+    if not api_key:
+        return {
+            "action_items": ["Mistral API key missing from environment."],
+            "key_decisions": ["Mistral API key missing from environment."],
+            "open_questions": ["Mistral API key missing from environment."]
+        }
+
+    try:
+        llm = ChatMistralAI(
+            model="mistral-large-latest",
+            temperature=0,
+            api_key=api_key
+        )
+
+        structured_llm = llm.with_structured_output(KeyInsightsSchema)
+
+        prompt = ChatPromptTemplate.from_messages([
+            (
+                "system",
+                "You are an executive meeting assistant. Process the meeting transcript and extract "
+                "Action Items, Key Decisions, and Open Questions.\n\n"
+                "STRICT RULES:\n"
+                "1. Keep items concise, objective, and specific.\n"
+                "2. Do NOT return empty lists or null values.\n"
+                "3. If a section has no relevant content in the transcript, populate the list with ['None discussed']."
+            ),
+            ("human", "TRANSCRIPT CONTENT:\n{transcript}")
+        ])
+
+        chain = prompt | structured_llm
+        result: KeyInsightsSchema = chain.invoke({"transcript": transcript})
+
+        return {
+            "action_items": result.action_items if result.action_items else ["None discussed"],
+            "key_decisions": result.key_decisions if result.key_decisions else ["None discussed"],
+            "open_questions": result.open_questions if result.open_questions else ["None discussed"]
+        }
+
+    except Exception as e:
+        return {
+            "action_items": [f"Extraction failed: {str(e)}"],
+            "key_decisions": [f"Extraction failed: {str(e)}"],
+            "open_questions": [f"Extraction failed: {str(e)}"]
+        }
+
+
+# ==========================================
+# 3. BACKWARD-COMPATIBLE WRAPPERS
+# ==========================================
+def extract_action_items(transcript: str) -> str:
+    """Wrapper function to get action items as a formatted string."""
+    return extract_insights(transcript)["action_items"]
 
 
 def extract_key_decisions(transcript: str) -> str:
-    chain = build_chain(
-        "You are an expert meeting analyst. From the meeting transcript, "
-        "extract all key decisions made. Format as a numbered list. "
-        "If none found say 'No key decisions found.'"
-    )
-    return chain.invoke(transcript)
+    """Wrapper function to get key decisions as a formatted string."""
+    return extract_insights(transcript)["key_decisions"]
 
 
 def extract_questions(transcript: str) -> str:
-    chain = build_chain(
-        "From the meeting transcript, extract all unresolved questions "
-        "or topics needing follow-up. Format as a numbered list. "
-        "If none found say 'No open questions found.'"
-    )
-    return chain.invoke(transcript)
-
-
-def extract_all(transcript: str) -> dict:
-    """
-    Run action-item, decision, and question extraction concurrently.
-
-    These are three independent LLM calls over the same transcript that
-    were previously invoked one after another — each one waiting on a full
-    network round-trip to Mistral before the next started. Since they don't
-    depend on each other, running them in parallel threads (this is
-    network-bound I/O, so Python's GIL isn't a bottleneck here) cuts this
-    stage's wall-clock time to roughly that of a single call instead of
-    three stacked back to back.
-    """
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        action_future = executor.submit(extract_action_items, transcript)
-        decision_future = executor.submit(extract_key_decisions, transcript)
-        question_future = executor.submit(extract_questions, transcript)
-
-        return {
-            "action_items": action_future.result(),
-            "key_decisions": decision_future.result(),
-            "open_questions": question_future.result(),
-        }
+    """Wrapper function to get open questions as a formatted string."""
+    return extract_insights(transcript)["open_questions"]

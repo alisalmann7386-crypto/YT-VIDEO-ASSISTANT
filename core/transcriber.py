@@ -1,133 +1,299 @@
 import os
 import requests
-import torch
-from faster_whisper import WhisperModel
+from typing import List, Dict, Any, Optional
+import whisper
 from pydub import AudioSegment
 
-# Sarvam's sync STT-translate API rejects audio longer than 30s.
-# We slice each chunk into 25s pieces (with a 5s safety margin) before sending.
-SARVAM_PIECE_SECONDS = 25
+
+def format_timestamp(seconds: float) -> str:
+    """Converts seconds into a human-readable HH:MM:SS or MM:SS format."""
+    seconds = int(seconds)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "tiny")
+def get_audio_duration(file_path: str) -> float:
+    """Helper function to get the exact duration of an audio file in seconds."""
+    try:
+        audio = AudioSegment.from_file(file_path)
+        return len(audio) / 1000.0
+    except Exception:
+        return 0.0
 
 
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
-SARVAM_STT_TRANSLATE_URL = "https://api.sarvam.ai/speech-to-text-translate"
-SARVAM_MODEL = os.getenv("SARVAM_STT_MODEL", "saaras:v2.5")
-
-_model = None
-
-
-def load_model():
-    """
-    Loads a faster-whisper model (CTranslate2 backend) instead of the
-    reference openai-whisper implementation. On CPU this runs int8-quantized
-    inference, which is typically 4-8x faster than openai-whisper's FP32
-    fallback for the same model size — with a negligible accuracy difference.
-    Automatically uses the GPU (float16) if CUDA is available.
-    """
-    global _model
-
-    if _model is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        compute_type = "float16" if device == "cuda" else "int8"
-        print(f"Loading faster-whisper model: {WHISPER_MODEL} ({device}, {compute_type}) ...")
-        _model = WhisperModel(WHISPER_MODEL, device=device, compute_type=compute_type)
-        print("Whisper model loaded.")
-    return _model
-
-
-def transcribe_chunk_whisper(chunk_path: str) -> str:
-
-    model = load_model()
-
-    segments, _info = model.transcribe(chunk_path, task="transcribe")
-    return "".join(segment.text for segment in segments)
+# ── Local OpenAI Whisper Engine ──────────────────────────────────────────────
+def transcribe_chunk_whisper(
+    chunk_path: str, 
+    model: Any, 
+    time_offset: float = 0.0,
+    task: str = "transcribe"
+) -> tuple[str, list[dict]]:
+    """Transcribes a single audio chunk using local Whisper."""
+    result = model.transcribe(chunk_path, task=task)
+    
+    chunk_text = result.get("text", "").strip()
+    segments = []
+    
+    for seg in result.get("segments", []):
+        start_sec = seg["start"] + time_offset
+        end_sec = seg["end"] + time_offset
+        
+        segments.append({
+            "start": format_timestamp(start_sec),
+            "end": format_timestamp(end_sec),
+            "start_raw": start_sec,
+            "end_raw": end_sec,
+            "text": seg["text"].strip()
+        })
+        
+    return chunk_text, segments
 
 
+# ── Sarvam AI Engine (Indic Languages) ─────────────────────────────────────────
+def transcribe_chunk_sarvam(
+    chunk_path: str,
+    api_key: str,
+    time_offset: float = 0.0,
+    mode: str = "transcribe"
+) -> tuple[str, list[dict]]:
+    """Transcribes a single audio chunk using Sarvam AI REST API."""
 
-def _send_to_sarvam(piece_path: str) -> str:
-    """Send one ≤30s WAV file to Sarvam and return the English transcript."""
-    headers = {"api-subscription-key": SARVAM_API_KEY}
+    url = "https://api.sarvam.ai/speech-to-text"
 
-    with open(piece_path, "rb") as f:
-        files = {"file": (os.path.basename(piece_path), f, "audio/wav")}
-        data = {"model": SARVAM_MODEL, "with_diarization": "false"}
-        response = requests.post(
-            SARVAM_STT_TRANSLATE_URL,
-            headers=headers,
-            files=files,
-            data=data,
-            timeout=120,
+    if not api_key:
+        raise ValueError("SARVAM_API_KEY is missing.")
+
+    headers = {
+        "api-subscription-key": api_key
+    }
+
+    payload = {
+        "model": "saaras:v3",
+        "mode": mode,
+        "language_code": "unknown",
+        "with_timestamps": "true"
+    }
+
+    import mimetypes
+
+    mime_type = (
+        mimetypes.guess_type(chunk_path)[0]
+        or "audio/mpeg"
+    )
+
+    try:
+
+        with open(chunk_path, "rb") as audio_file:
+
+            files = {
+                "file": (
+                    os.path.basename(chunk_path),
+                    audio_file,
+                    mime_type
+                )
+            }
+
+            response = requests.post(
+                url,
+                headers=headers,
+                data=payload,
+                files=files,
+                timeout=120
+            )
+
+    except requests.RequestException as e:
+
+        raise RuntimeError(
+            f"Could not connect to Sarvam API: {e}"
         )
 
-    if not response.ok:
-        print(f"\n❌ Sarvam returned {response.status_code}")
-        print(f"Response body: {response.text}\n")
-        response.raise_for_status()
+    # ---------------------------------------------------------
+    # ERROR HANDLING
+    # ---------------------------------------------------------
 
-    return response.json().get("transcript", "")
+    if response.status_code != 200:
+
+        if response.status_code == 401:
+            raise RuntimeError(
+                "Sarvam authentication failed. "
+                "Check SARVAM_API_KEY."
+            )
+
+        if response.status_code == 403:
+            raise RuntimeError(
+                "Sarvam returned 403 Forbidden. "
+                "Your API request was rejected. "
+                "Check that SARVAM_API_KEY is valid and active."
+            )
+
+        raise RuntimeError(
+            f"Sarvam API error ({response.status_code}): "
+            f"{response.text[:500]}"
+        )
+
+    # ---------------------------------------------------------
+    # PARSE RESPONSE
+    # ---------------------------------------------------------
+
+    data = response.json()
+
+    chunk_text = data.get(
+        "transcript",
+        ""
+    ).strip()
+
+    segments = []
+
+    timestamps_obj = data.get("timestamps")
+
+    # ---------------------------------------------------------
+    # WORD / SEGMENT TIMESTAMPS
+    # ---------------------------------------------------------
+
+    if timestamps_obj and isinstance(
+        timestamps_obj,
+        dict
+    ):
+
+        words_or_chunks = timestamps_obj.get(
+            "words",
+            []
+        )
+
+        for entry in words_or_chunks:
+
+            start_sec = (
+                float(
+                    entry.get(
+                        "start_time_seconds",
+                        0.0
+                    )
+                )
+                + time_offset
+            )
+
+            end_sec = (
+                float(
+                    entry.get(
+                        "end_time_seconds",
+                        0.0
+                    )
+                )
+                + time_offset
+            )
+
+            text = (
+                entry.get("word", "")
+                or entry.get("transcript", "")
+            ).strip()
+
+            if not text:
+                continue
+
+            segments.append({
+                "start": format_timestamp(start_sec),
+                "end": format_timestamp(end_sec),
+                "start_raw": start_sec,
+                "end_raw": end_sec,
+                "text": text
+            })
+
+    # ---------------------------------------------------------
+    # FALLBACK: CHUNK LEVEL TIMESTAMP
+    # ---------------------------------------------------------
+
+    if not segments:
+
+        chunk_duration = get_audio_duration(
+            chunk_path
+        )
+
+        segments.append({
+            "start": format_timestamp(
+                time_offset
+            ),
+            "end": format_timestamp(
+                time_offset + chunk_duration
+            ),
+            "start_raw": time_offset,
+            "end_raw": (
+                time_offset + chunk_duration
+            ),
+            "text": chunk_text
+        })
+
+    return chunk_text, segments
 
 
-def transcribe_chunk_sarvam(chunk_path: str) -> str:
+# ── Processing Engine ────────────────────────────────────────────────────────
+def process_transcription(
+    chunks: List[str],
+    provider: str = "whisper",
+    model_size: str = "base",
+    translate_to_english: bool = False,
+    sarvam_api_key: Optional[str] = None
+) -> Dict[str, Any]:
+    """Main orchestrator function to transcribe audio chunks."""
+    full_text_list = []
+    all_segments = []
+    cumulative_offset = 0.0
+    
+    whisper_model = None
+    if provider == "whisper":
+        whisper_model = whisper.load_model(model_size)
+        
+    for chunk_path in chunks:
+        if not os.path.exists(chunk_path):
+            continue
+            
+        if provider == "sarvam":
+            if not sarvam_api_key:
+                sarvam_api_key = os.getenv("SARVAM_API_KEY")
+                if not sarvam_api_key:
+                    raise ValueError("SARVAM_API_KEY missing. Provide it or set it in your .env file.")
+            
+            mode = "translate" if translate_to_english else "transcribe"
+            chunk_text, segments = transcribe_chunk_sarvam(
+                chunk_path=chunk_path,
+                api_key=sarvam_api_key,
+                time_offset=cumulative_offset,
+                mode=mode
+            )
+        else:
+            task = "translate" if translate_to_english else "transcribe"
+            chunk_text, segments = transcribe_chunk_whisper(
+                chunk_path=chunk_path,
+                model=whisper_model,
+                time_offset=cumulative_offset,
+                task=task
+            )
+            
+        if chunk_text:
+            full_text_list.append(chunk_text)
+            all_segments.extend(segments)
+            
+        cumulative_offset += get_audio_duration(chunk_path)
+        
+    return {
+        "full_text": " ".join(full_text_list),
+        "segments": all_segments
+    }
+
+
+# ── App Wrapper ──────────────────────────────────────────────────────────────
+def transcribe_all(chunks: List[str], language: str = "english") -> Dict[str, Any]:
     """
-    Sarvam sync API only accepts ≤30s audio. We split this chunk into
-    25-second pieces, send each separately, and join the transcripts.
+    Direct function import required by app.py.
+    Maps language options to the transcription provider.
     """
-    if not SARVAM_API_KEY:
-        raise RuntimeError("SARVAM_API_KEY is not set in environment / .env")
-
-    audio = AudioSegment.from_wav(chunk_path)
-    piece_ms = SARVAM_PIECE_SECONDS * 1000
-
-    full_text = ""
-    total_pieces = (len(audio) + piece_ms - 1) // piece_ms
-
-    for i, start in enumerate(range(0, len(audio), piece_ms)):
-        piece = audio[start: start + piece_ms]
-        piece_path = f"{chunk_path}_sv_{i}.wav"
-        piece.export(piece_path, format="wav")
-
-        try:
-            print(f"  → Sarvam piece {i + 1}/{total_pieces} ...")
-            full_text += _send_to_sarvam(piece_path) + " "
-        finally:
-            if os.path.exists(piece_path):
-                os.remove(piece_path)
-
-    return full_text.strip()
-
-   
-
-
-
-def transcribe_chunk(chunk_path: str, language: str = "english") -> str:
-    """
-    Route one chunk to Whisper or Sarvam depending on language choice.
-    - english  → Whisper (local model)
-    - hinglish → Sarvam (translates to English while transcribing)
-    """
-    if language.lower() == "hinglish":
-        return transcribe_chunk_sarvam(chunk_path)
-    return transcribe_chunk_whisper(chunk_path)
-
-
-def transcribe_all(chunks: list, language: str = "english") -> str:
-
-    full_transcript = "" 
-
-    engine = "Sarvam AI" if language.lower() == "hinglish" else "Whisper"
-    print(f"Using {engine} for transcription.")
-
-    for i, chunk in enumerate(chunks):  
-
-        print(f"Transcribing chunk {i + 1}/{len(chunks)}...")
-
-        text = transcribe_chunk(chunk, language=language)  
-
-        full_transcript += text + " "  
-
-    print("Transcription complete.")
-
-    return full_transcript.strip()  
+    provider = "sarvam" if language.lower() in ["hinglish", "sarvam"] else "whisper"
+    translate_flag = True if language.lower() == "hinglish" else False
+    
+    return process_transcription(
+        chunks=chunks,
+        provider=provider,
+        translate_to_english=translate_flag
+    )

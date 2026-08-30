@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 venv/
 downloades/
+temp_uploads/
+vector_db/

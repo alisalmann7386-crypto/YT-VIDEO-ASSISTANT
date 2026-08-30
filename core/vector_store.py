@@ -1,7 +1,6 @@
-import os
-import uuid
+import os 
 from langchain_chroma import Chroma 
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 
@@ -16,16 +15,6 @@ def get_embeddings():
     )
 
 def build_vector_store(transcript : str)->Chroma:
-    """
-    Build a fresh, isolated in-memory vector store for one transcript.
-
-    NOTE: this intentionally does NOT persist to disk and uses a unique
-    collection name per call. Previously this reused a single persisted
-    collection name, so analysing a second video in the same running app
-    would mix its chunks in with the first video's — chat answers could
-    then pull context from the wrong meeting. Each analysis now gets its
-    own throwaway collection scoped to that session's rag_chain.
-    """
     print("Building vector Store")
 
     splitter = RecursiveCharacterTextSplitter(
@@ -43,7 +32,8 @@ def build_vector_store(transcript : str)->Chroma:
     vector_store = Chroma.from_documents(
         documents= docs,
         embedding=embeddings,
-        collection_name=f"{COLLECTION_NAME}_{uuid.uuid4().hex[:8]}",
+        collection_name=COLLECTION_NAME,
+        persist_directory=CHROMA_DIR
     )
 
     return vector_store
@@ -65,5 +55,3 @@ def get_retriever(vector_store : Chroma, k :int = 4):
         search_type = 'similarity',
         search_kwargs = {"k":k}
     )
-
-
