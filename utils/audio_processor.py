@@ -8,47 +8,67 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 def download_youtube_audio(url: str) -> tuple[str, dict]:
     """
     Downloads YouTube audio as WAV and extracts video metadata.
+    Handles YouTube 403 Forbidden errors with client fallbacks.
     """
     output_path = os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s")
     
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": output_path,
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "wav",
-            "preferredquality": "192",
-        }],
-        "quiet": True,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "web"]
+    client_strategies = [
+        ["mweb", "ios"],
+        ["android", "ios"],
+        ["web", "mweb"],
+        ["tvhtml5"]
+    ]
+
+    last_exception = None
+
+    for client in client_strategies:
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": output_path,
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "wav",
+                "preferredquality": "192",
+            }],
+            "quiet": True,
+            "no_warnings": True,
+            "nocheckcertificate": True,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": client
+                }
+            },
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
             }
-        },
-        "nocheckcertificate": True,
-    }
-    
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        base, _ = os.path.splitext(filename)
-        wav_filename = f"{base}.wav"
-
-        # Format duration into MM:SS or HH:MM:SS
-        duration_sec = info.get("duration", 0)
-        hours, remainder = divmod(duration_sec, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        duration_str = f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:02d}:{seconds:02d}"
-
-        metadata = {
-            "title": info.get("title", "YouTube Video"),
-            "channel": info.get("uploader", "Unknown Channel"),
-            "thumbnail": info.get("thumbnail", ""),
-            "duration": duration_str,
-            "url": url
         }
         
-    return wav_filename, metadata
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+                base, _ = os.path.splitext(filename)
+                wav_filename = f"{base}.wav"
+
+                duration_sec = info.get("duration", 0) if info else 0
+                hours, remainder = divmod(duration_sec, 3600)
+                minutes, seconds = divmod(remainder, 60)
+                duration_str = f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:02d}:{seconds:02d}"
+
+                metadata = {
+                    "title": info.get("title", "YouTube Video") if info else "YouTube Video",
+                    "channel": info.get("uploader", "Unknown Channel") if info else "Unknown Channel",
+                    "thumbnail": info.get("thumbnail", "") if info else "",
+                    "duration": duration_str,
+                    "url": url
+                }
+                return wav_filename, metadata
+        except Exception as e:
+            last_exception = e
+            continue
+
+    raise RuntimeError(f"Failed to download YouTube audio (403 Forbidden). Error details: {last_exception}")
 
 
 def convert_to_wav(input_path: str) -> tuple[str, dict]:
